@@ -1,83 +1,96 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const dns = require('dns');
 const mongoose = require('mongoose');
-const bodyParser = require('body-parser');
-
+const Base62 = require('base62');
 const app = express();
+const dns = require('dns');
+
 
 // Basic Configuration
 const port = process.env.PORT || 3000;
 
+mongoose.connect(process.env.MONGO_URI);
+
+const db = mongoose.connection;
+db.on('error', console.error.bind(console, 'connection error:'));
+db.once('open', function(){ console.log('connected to mongoDB');});
+
 app.use(cors());
-
-// Body parsing middleware
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
-
+app.use(express.json());
+app.use(express.urlencoded({ extended: true })); 
 app.use('/public', express.static(`${process.cwd()}/public`));
 
 app.get('/', function(req, res) {
   res.sendFile(process.cwd() + '/views/index.html');
 });
 
+const urlSchema= new mongoose.Schema({
+  original_url:{type:String, required: true},
+  short_url:{type:String, required: true}
+});
+
+const Url = mongoose.model('Url', urlSchema);
+
+let counter = 0;
+
 // Your first API endpoint
 app.get('/api/hello', function(req, res) {
   res.json({ greeting: 'hello API' });
 });
 
-// MongoDB connection
-mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
 
-// Define a schema and model for the URL
-const urlSchema = new mongoose.Schema({
-  original_url: { type: String, required: true },
-  short_url: { type: Number, required: true }
-});
+app.post('/api/shorturl', async(req, res)=>{
+  const{ original_url } = req.body;
+  try {
+    const urlParts = new URL(original_url); // Will throw an error if the URL is invalid
 
-const Url = mongoose.model('Url', urlSchema);
+    // Check DNS to verify the hostname
+    dns.lookup(urlParts.hostname, async (err) => {
+      if (err) {
+        return res.status(400).json({ error: 'Invalid URL' });
+      }
 
-// POST endpoint to shorten URL
-app.post('/api/shorturl', (req, res) => {
-  const { original_url } = req.body;
+      try {
+        // Check if the URL already exists in the database
+        const existingUrl = await Url.findOne({ original_url });
+        if (existingUrl) {
+          return res.json({ original_url, short_url: existingUrl.short_url });
+        }
 
-  // Use dns.lookup to validate the URL
-  const urlParts = new URL(original_url);
-  dns.lookup(urlParts.hostname, (err) => {
-    if (err) {
-      return res.status(400).json({ error: 'Invalid URL' });
-    }
+        // Generate a new short URL
+        const urlCount = await Url.countDocuments();
+        const newUrl = new Url({
+          original_url,
+          short_url: urlCount + 1
+        });
 
-    // Create a new URL record
-    Url.countDocuments({}, (err, count) => {
-      if (err) return res.status(500).json({ error: 'Internal Server Error' });
-
-      const newUrl = new Url({
-        original_url,
-        short_url: count + 1
-      });
-
-      newUrl.save((err, savedUrl) => {
-        if (err) return res.status(500).json({ error: 'Internal Server Error' });
-        res.json({ original_url: savedUrl.original_url, short_url: savedUrl.short_url });
-      });
+        await newUrl.save();
+        return res.json({ original_url, short_url: newUrl.short_url });
+      } catch (err) {
+        return res.status(500).send(err);
+      }
     });
-  });
+  } catch (error) {
+    return res.status(400).json({ error: 'Invalid URL format' });
+  }
 });
 
-// Redirect to original URL
-app.get('/api/shorturl/:shorturl', (req, res) => {
-  const { shorturl } = req.params;
+// API endpoint to redirect to the original URL
+app.get('/api/shorturl/:shorturl', async function(req, res) {
+  const shortUrl = req.params.shorturl;
 
-  Url.findOne({ short_url: shorturl }, (err, doc) => {
-    if (err || !doc) {
-      return res.status(404).json({ error: 'URL not found' });
+  try {
+    const urlEntry = await Url.findOne({ short_url: shortUrl });
+    if (urlEntry) {
+      return res.redirect(urlEntry.original_url);
     }
-    res.redirect(doc.original_url);
-  });
+    return res.status(404).json({ error: 'Short URL not found' });
+  } catch (err) {
+    return res.status(500).send(err);
+  }
 });
-
+//let foundUrl = await
 app.listen(port, function() {
   console.log(`Listening on port ${port}`);
 });
